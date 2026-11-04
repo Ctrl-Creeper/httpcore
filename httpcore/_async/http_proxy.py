@@ -17,7 +17,7 @@ from .._models import (
     enforce_url,
 )
 from .._ssl import default_ssl_context
-from .._synchronization import AsyncLock
+from .._synchronization import AsyncLock, AsyncShieldCancellation
 from .._trace import Trace
 from .connection import AsyncHTTPConnection
 from .connection_pool import AsyncConnectionPool
@@ -312,9 +312,16 @@ class AsyncTunnelHTTPConnection(AsyncConnectionInterface):
                     "server_hostname": self._remote_origin.host.decode("ascii"),
                     "timeout": timeout,
                 }
-                async with Trace("start_tls", logger, request, kwargs) as trace:
-                    stream = await stream.start_tls(**kwargs)
-                    trace.return_value = stream
+                try:
+                    async with Trace("start_tls", logger, request, kwargs) as trace:
+                        stream = await stream.start_tls(**kwargs)
+                        trace.return_value = stream
+                except BaseException:
+                    # CONNECT has left the inner HTTP/1.1 connection ACTIVE.
+                    # Close both its stream and state, including on cancellation.
+                    with AsyncShieldCancellation():
+                        await self._connection.aclose()
+                    raise
 
                 # Determine if we should be using HTTP/1.1 or HTTP/2
                 ssl_object = stream.get_extra_info("ssl_object")
